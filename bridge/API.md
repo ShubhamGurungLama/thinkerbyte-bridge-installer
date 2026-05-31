@@ -68,5 +68,15 @@ Starts a stopped session.
 ### `POST /sessions/:id/stop`
 Stops a running session.
 
+### `POST /sessions/:id/exec`
+Body:
+```json
+{
+  "node": "student",
+  "command": "ip a"
+}
+```
+Runs a command on a node and returns stdout/stderr/exit code.
+
 ### `DELETE /sessions/:id`
 Destroys containers + networks for a session.

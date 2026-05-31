@@ -173,6 +173,22 @@ async function run(cmd, args, options = {}) {
   });
 }
 
+async function runResult(cmd, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      cwd: options.cwd || process.cwd(),
+      env: options.env || process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d.toString()));
+    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.on('error', reject);
+    child.on('exit', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+  });
+}
+
 function engineCmd() {
   if (!runtimeEngine) throw new Error('No container runtime found (docker/podman)');
   return runtimeEngine;
@@ -319,6 +335,10 @@ async function connectContainerNetwork(containerName, network, ip) {
 
 async function execIn(containerName, command) {
   await run(engineCmd(), ['exec', containerName, '/bin/sh', '-lc', command]);
+}
+
+async function execInResult(containerName, command) {
+  return runResult(engineCmd(), ['exec', containerName, '/bin/sh', '-lc', command]);
 }
 
 function topologyTemplate(topology) {
@@ -490,6 +510,23 @@ async function destroySession(sessionId, silent) {
   delete state.sessions[sessionId];
   saveState();
   return { destroyed: sessionId };
+}
+
+async function execInSession(sessionId, nodeName, command) {
+  const session = state.sessions[sessionId];
+  if (!session) throw new Error('session not found');
+  const node = session.nodes.find((n) => n.name === nodeName || n.containerName === nodeName);
+  if (!node) throw new Error('node not found');
+  const out = await execInResult(node.containerName, command);
+  return {
+    sessionId,
+    node: node.name,
+    containerName: node.containerName,
+    command,
+    exitCode: out.code,
+    stdout: out.stdout,
+    stderr: out.stderr,
+  };
 }
 
 async function resumeLatestSession(filter) {
@@ -668,6 +705,15 @@ async function route(req, res, url, origin) {
     const id = url.pathname.split('/')[2];
     const session = await stopSession(id);
     return json(res, 200, { ok: true, session }, origin);
+  }
+
+  if (url.pathname.match(/^\/sessions\/[^/]+\/exec$/) && req.method === 'POST') {
+    if (!validateToken(req)) return json(res, 401, { ok: false, error: 'invalid token' }, origin);
+    const id = url.pathname.split('/')[2];
+    const body = await parseBody(req);
+    if (!body.node || !body.command) return json(res, 400, { ok: false, error: 'node and command are required' }, origin);
+    const out = await execInSession(id, String(body.node), String(body.command));
+    return json(res, 200, { ok: true, result: out }, origin);
   }
 
   if (url.pathname.match(/^\/sessions\/[^/]+$/) && req.method === 'DELETE') {
