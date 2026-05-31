@@ -1,0 +1,22 @@
+{
+  "id": "fedora",
+  "label": "Fedora Minimal",
+  "distroFamily": "fedora",
+  "baseImage": "fedora:40",
+  "shell": "/bin/bash",
+  "packageManager": "dnf",
+  "bootstrapPackages": [
+    "bash",
+    "curl",
+    "iproute",
+    "iputils",
+    "bind-utils",
+    "tcpdump",
+    "iptables-nft",
+    "nftables",
+    "nmap-ncat",
+    "nano"
+  ],
+  "banner": "ThinkerByte Lab",
+  "prompt": "student@thinkerbyte-fedora:~$"
+}

@@ -1,0 +1,34 @@
+{
+  "name": "thinkerbyte-local-bridge",
+  "version": "0.1.0",
+  "apiVersion": "2026-05-31",
+  "listenHost": "127.0.0.1",
+  "listenPort": 19777,
+  "controlPlane": "localhost-only",
+  "allowedOrigins": [
+    "http://127.0.0.1:18086",
+    "http://localhost:18086",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080"
+  ],
+  "defaults": {
+    "profile": "alpine",
+    "topology": "routed",
+    "sessionTtlMinutes": 120,
+    "maxConcurrentSessions": 6,
+    "maxCacheBytes": 6442450944,
+    "pruneUnusedImagesAfterHours": 48
+  },
+  "cleanupPolicy": {
+    "removeStoppedContainers": true,
+    "removeExpiredSessions": true,
+    "removeOrphanNetworks": true,
+    "pruneImages": true,
+    "pruneVolumes": true
+  },
+  "profiles": [
+    "alpine",
+    "debian",
+    "fedora"
+  ]
+}

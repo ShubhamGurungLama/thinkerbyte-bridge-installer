@@ -1,0 +1,22 @@
+{
+  "id": "debian",
+  "label": "Debian Slim",
+  "distroFamily": "debian",
+  "baseImage": "debian:bookworm-slim",
+  "shell": "/bin/bash",
+  "packageManager": "apt",
+  "bootstrapPackages": [
+    "bash",
+    "curl",
+    "iproute2",
+    "iputils-ping",
+    "dnsutils",
+    "tcpdump",
+    "iptables",
+    "nftables",
+    "netcat-openbsd",
+    "nano"
+  ],
+  "banner": "ThinkerByte Lab",
+  "prompt": "student@thinkerbyte-debian:~$"
+}

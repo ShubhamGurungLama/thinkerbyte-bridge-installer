@@ -1,0 +1,22 @@
+{
+  "id": "alpine",
+  "label": "Alpine Linux",
+  "distroFamily": "alpine",
+  "baseImage": "alpine:3.20",
+  "shell": "/bin/sh",
+  "packageManager": "apk",
+  "bootstrapPackages": [
+    "bash",
+    "curl",
+    "iproute2",
+    "iputils",
+    "bind-tools",
+    "tcpdump",
+    "iptables",
+    "nftables",
+    "netcat-openbsd",
+    "nano"
+  ],
+  "banner": "ThinkerByte Lab",
+  "prompt": "student@thinkerbyte-alpine:~$"
+}
