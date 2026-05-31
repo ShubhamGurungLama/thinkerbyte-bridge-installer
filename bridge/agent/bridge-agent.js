@@ -502,7 +502,12 @@ async function resumeLatestSession(filter) {
   });
   if (!target) return null;
   if (target.status === 'running') return target;
-  return startSession(target.id);
+  try {
+    return await startSession(target.id);
+  } catch (_) {
+    await destroySession(target.id, true);
+    return null;
+  }
 }
 
 async function enginePrune() {
