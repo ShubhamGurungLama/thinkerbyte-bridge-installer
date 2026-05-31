@@ -46,10 +46,21 @@ Body:
   "profile": "alpine",
   "topology": "routed",
   "ttlMinutes": 90,
-  "name": "net-lab-1"
+  "name": "net-lab-1",
+  "resumeIfPossible": true
 }
 ```
 Creates a new disposable networking session.
+
+### `POST /sessions/resume`
+Body:
+```json
+{
+  "profile": "alpine",
+  "topology": "routed"
+}
+```
+Resumes latest matching non-expired session if available.
 
 ### `POST /sessions/:id/start`
 Starts a stopped session.

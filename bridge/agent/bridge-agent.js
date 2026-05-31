@@ -187,6 +187,50 @@ async function imageExists(image) {
   }
 }
 
+function runtimeImageTag(profile) {
+  const versionTag = String(manifest.version || '0').replace(/[^a-zA-Z0-9._-]/g, '-');
+  return `thinkerbyte/${profile.id}-cli:${versionTag}`;
+}
+
+function bootstrapInstallCommand(profile) {
+  const pkgs = (profile.bootstrapPackages || []).join(' ');
+  if (!pkgs) return 'true';
+  if (profile.distroFamily === 'alpine') {
+    return `apk update && apk add --no-cache ${pkgs}`;
+  }
+  if (profile.distroFamily === 'debian') {
+    return `apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ${pkgs} && apt-get clean`;
+  }
+  if (profile.distroFamily === 'fedora') {
+    return `dnf -y install ${pkgs} && dnf clean all`;
+  }
+  return 'true';
+}
+
+async function buildRuntimeImage(profile) {
+  const target = runtimeImageTag(profile);
+  const temp = `tblab-build-${profile.id}-${Date.now()}`;
+  const installCmd = bootstrapInstallCommand(profile);
+  const banner = (profile.banner || 'ThinkerByte Lab').replace(/\"/g, '\\"');
+  try {
+    await run(engineCmd(), ['run', '-d', '--name', temp, profile.baseImage, '/bin/sh', '-lc', 'sleep 600']);
+    await execIn(temp, installCmd);
+    await execIn(temp, `echo \"${banner}\" > /etc/motd || true`);
+    await run(engineCmd(), ['commit', temp, target]);
+  } finally {
+    try {
+      await run(engineCmd(), ['rm', '-f', temp]);
+    } catch (_) {}
+  }
+  return target;
+}
+
+async function ensureRuntimeImage(profile) {
+  const target = runtimeImageTag(profile);
+  if (await imageExists(target)) return target;
+  return buildRuntimeImage(profile);
+}
+
 async function ensureImage(profileId) {
   const profile = profiles[profileId];
   if (!profile) throw new Error('Unknown profile: ' + profileId);
@@ -194,20 +238,26 @@ async function ensureImage(profileId) {
   if (!exists) {
     await run(engineCmd(), ['pull', profile.baseImage]);
   }
+  profile.runtimeImage = await ensureRuntimeImage(profile);
   return profile;
 }
 
 async function listImages() {
   const result = [];
   for (const p of Object.values(profiles)) {
-    const exists = await imageExists(p.baseImage);
+    const baseExists = await imageExists(p.baseImage);
+    const runtimeImage = runtimeImageTag(p);
+    const runtimeExists = await imageExists(runtimeImage);
     result.push({
       id: p.id,
       label: p.label,
       distroFamily: p.distroFamily,
       baseImage: p.baseImage,
+      runtimeImage,
       packageManager: p.packageManager,
-      exists,
+      exists: baseExists && runtimeExists,
+      baseExists,
+      runtimeExists,
       banner: p.banner,
     });
   }
@@ -216,6 +266,13 @@ async function listImages() {
 
 function sessionContainers(session) {
   return session.nodes.map((n) => n.containerName);
+}
+
+function isExpired(session) {
+  if (!session || !session.expiresAt) return false;
+  const ts = new Date(session.expiresAt).getTime();
+  if (Number.isNaN(ts)) return false;
+  return Date.now() >= ts;
 }
 
 async function createNetwork(name, subnet) {
@@ -247,7 +304,7 @@ function defaultNodeCommand(profile) {
 async function createContainer(node, profile, extraArgs) {
   const args = ['run', '-d', '--name', node.containerName, '--hostname', node.hostname || node.name];
   if (extraArgs && extraArgs.length) args.push(...extraArgs);
-  args.push(profile.baseImage);
+  args.push(profile.runtimeImage || profile.baseImage);
   args.push(...defaultNodeCommand(profile));
   const out = await run(engineCmd(), args);
   return out.stdout.trim();
@@ -311,6 +368,11 @@ async function createSession(payload) {
   const profileId = payload.profile || manifest.defaults.profile || 'alpine';
   const topology = payload.topology || manifest.defaults.topology || 'routed';
   const ttlMinutes = Number(payload.ttlMinutes || manifest.defaults.sessionTtlMinutes || 120);
+
+  if (payload.resumeIfPossible) {
+    const resumed = await resumeLatestSession({ profile: profileId, topology });
+    if (resumed) return resumed;
+  }
 
   if (Object.keys(state.sessions).filter((id) => state.sessions[id].status === 'running').length >= maxSessions()) {
     throw new Error('max concurrent sessions reached');
@@ -430,6 +492,19 @@ async function destroySession(sessionId, silent) {
   return { destroyed: sessionId };
 }
 
+async function resumeLatestSession(filter) {
+  const sorted = listSessions().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const target = sorted.find((s) => {
+    if (isExpired(s)) return false;
+    if (filter && filter.profile && s.profile !== filter.profile) return false;
+    if (filter && filter.topology && s.topology !== filter.topology) return false;
+    return true;
+  });
+  if (!target) return null;
+  if (target.status === 'running') return target;
+  return startSession(target.id);
+}
+
 async function enginePrune() {
   if (!runtimeEngine) return;
   if (!manifest.cleanupPolicy.pruneImages && !manifest.cleanupPolicy.pruneVolumes) return;
@@ -449,6 +524,27 @@ async function enginePrune() {
     try {
       await run(engineCmd(), ['container', 'prune', '-f']);
     } catch (_) {}
+  }
+  await pruneOldRuntimeImages();
+}
+
+async function pruneOldRuntimeImages() {
+  if (!runtimeEngine) return;
+  let out;
+  try {
+    out = await run(engineCmd(), ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']);
+  } catch (_) {
+    return;
+  }
+  const lines = out.stdout.split('\\n').map((x) => x.trim()).filter(Boolean);
+  const keep = new Set(Object.values(profiles).map((p) => runtimeImageTag(p)));
+  for (const img of lines) {
+    if (!img.startsWith('thinkerbyte/')) continue;
+    if (!keep.has(img)) {
+      try {
+        await run(engineCmd(), ['image', 'rm', '-f', img]);
+      } catch (_) {}
+    }
   }
 }
 
@@ -515,6 +611,8 @@ async function route(req, res, url, origin) {
       runtimeAvailable: Boolean(runtimeEngine),
       sessions: listSessions().length,
       defaults: manifest.defaults,
+      cleanupPolicy: manifest.cleanupPolicy,
+      resumeMode: true,
     }, origin);
   }
 
@@ -543,6 +641,14 @@ async function route(req, res, url, origin) {
     const body = await parseBody(req);
     const session = await createSession(body);
     return json(res, 201, { ok: true, session }, origin);
+  }
+
+  if (url.pathname === '/sessions/resume' && req.method === 'POST') {
+    if (!validateToken(req)) return json(res, 401, { ok: false, error: 'invalid token' }, origin);
+    const body = await parseBody(req);
+    const resumed = await resumeLatestSession({ profile: body.profile, topology: body.topology });
+    if (!resumed) return json(res, 404, { ok: false, error: 'no resumable session found' }, origin);
+    return json(res, 200, { ok: true, session: resumed, resumed: true }, origin);
   }
 
   if (url.pathname.match(/^\/sessions\/[^/]+\/start$/) && req.method === 'POST') {

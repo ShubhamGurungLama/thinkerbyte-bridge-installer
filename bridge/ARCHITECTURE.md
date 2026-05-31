@@ -15,7 +15,8 @@ Run real networking/cyber labs locally while browser is only UI/control.
 3. User selects profile (`alpine`, `debian`, `fedora`).
 4. UI calls `/images/pull` and `/sessions`.
 5. Bridge creates isolated topology and returns node map.
-6. Session ends -> bridge destroys resources.
+6. Resume mode can reopen latest valid session for same profile/topology.
+7. Session ends/TTL expiry -> bridge destroys resources.
 
 ## Topology Templates
 - `single`: one node (`student`).
@@ -27,6 +28,7 @@ Run real networking/cyber labs locally while browser is only UI/control.
 - Max concurrent session cap.
 - Prune stopped containers and orphan networks.
 - Prune unused images/volumes by policy window.
+- Remove old ThinkerByte runtime-image versions automatically.
 
 ## Security
 - Localhost bind only.
