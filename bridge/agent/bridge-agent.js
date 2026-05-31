@@ -284,6 +284,18 @@ function sessionContainers(session) {
   return session.nodes.map((n) => n.containerName);
 }
 
+function securityPolicy() {
+  return manifest.securityPolicy || {};
+}
+
+function useInternalNetworks(payload) {
+  const policy = securityPolicy();
+  const globalAllowEgress = Boolean(manifest.defaults && manifest.defaults.allowExternalEgress);
+  const requestAllowEgress = Boolean(payload && payload.allowExternalEgress);
+  if (requestAllowEgress && globalAllowEgress) return false;
+  return policy.internalNetworks !== false;
+}
+
 function isExpired(session) {
   if (!session || !session.expiresAt) return false;
   const ts = new Date(session.expiresAt).getTime();
@@ -291,8 +303,34 @@ function isExpired(session) {
   return Date.now() >= ts;
 }
 
-async function createNetwork(name, subnet) {
+function seedFromSession(sessionId, attempt) {
+  const digest = crypto.createHash('sha1').update(`${sessionId}:${attempt}`).digest();
+  return ((digest[0] << 8) | digest[1]) & 0x0fff; // 0..4095
+}
+
+function netParts(seedOffset) {
+  const seed = seedOffset & 0x0fff;
+  const second = 16 + Math.floor(seed / 256); // 172.16..172.31
+  const third = seed % 256;
+  return { second, third };
+}
+
+function subnetFrom(parts) {
+  return `172.${parts.second}.${parts.third}.0/24`;
+}
+
+function ipFrom(parts, host) {
+  return `172.${parts.second}.${parts.third}.${host}`;
+}
+
+function isOverlapError(err) {
+  if (!err || !err.message) return false;
+  return /overlap|overlapping|invalid pool request|address pool/i.test(err.message);
+}
+
+async function createNetwork(name, subnet, internalOnly) {
   const args = ['network', 'create', '--driver', 'bridge'];
+  if (internalOnly) args.push('--internal');
   if (subnet) args.push('--subnet', subnet);
   args.push(name);
   await run(engineCmd(), args);
@@ -319,6 +357,11 @@ function defaultNodeCommand(profile) {
 
 async function createContainer(node, profile, extraArgs) {
   const args = ['run', '-d', '--name', node.containerName, '--hostname', node.hostname || node.name];
+  const policy = securityPolicy();
+  if (policy.noNewPrivileges) args.push('--security-opt', 'no-new-privileges:true');
+  if (policy.capDropAll) args.push('--cap-drop', 'ALL');
+  if (policy.pidsLimit) args.push('--pids-limit', String(policy.pidsLimit));
+  if (policy.memoryLimitMb) args.push('--memory', `${Number(policy.memoryLimitMb)}m`);
   if (extraArgs && extraArgs.length) args.push(...extraArgs);
   args.push(profile.runtimeImage || profile.baseImage);
   args.push(...defaultNodeCommand(profile));
@@ -341,12 +384,15 @@ async function execInResult(containerName, command) {
   return runResult(engineCmd(), ['exec', containerName, '/bin/sh', '-lc', command]);
 }
 
-function topologyTemplate(topology) {
+function topologyTemplate(topology, seed) {
+  const a = netParts(seed);
+  const b = netParts(seed + 1);
+
   if (topology === 'single') {
     return {
-      networks: [{ name: 'core', subnet: '10.50.0.0/24' }],
+      networks: [{ name: 'core', subnet: subnetFrom(a) }],
       nodes: [
-        { name: 'student', networks: [{ name: 'core', ip: '10.50.0.10' }], caps: ['NET_ADMIN', 'NET_RAW'] },
+        { name: 'student', networks: [{ name: 'core', ip: ipFrom(a, 10) }], caps: ['NET_ADMIN', 'NET_RAW'] },
       ],
       postConfig: [],
     };
@@ -354,11 +400,11 @@ function topologyTemplate(topology) {
 
   if (topology === 'lan') {
     return {
-      networks: [{ name: 'core', subnet: '10.51.0.0/24' }],
+      networks: [{ name: 'core', subnet: subnetFrom(a) }],
       nodes: [
-        { name: 'student', networks: [{ name: 'core', ip: '10.51.0.10' }], caps: ['NET_ADMIN', 'NET_RAW'] },
-        { name: 'server', networks: [{ name: 'core', ip: '10.51.0.20' }], caps: ['NET_ADMIN'] },
-        { name: 'capture', networks: [{ name: 'core', ip: '10.51.0.99' }], caps: ['NET_ADMIN', 'NET_RAW'] },
+        { name: 'student', networks: [{ name: 'core', ip: ipFrom(a, 10) }], caps: ['NET_ADMIN', 'NET_RAW'] },
+        { name: 'server', networks: [{ name: 'core', ip: ipFrom(a, 20) }], caps: ['NET_ADMIN'] },
+        { name: 'capture', networks: [{ name: 'core', ip: ipFrom(a, 99) }], caps: ['NET_ADMIN', 'NET_RAW'] },
       ],
       postConfig: [],
     };
@@ -366,18 +412,18 @@ function topologyTemplate(topology) {
 
   return {
     networks: [
-      { name: 'left', subnet: '10.10.1.0/24' },
-      { name: 'right', subnet: '10.10.2.0/24' },
+      { name: 'left', subnet: subnetFrom(a) },
+      { name: 'right', subnet: subnetFrom(b) },
     ],
     nodes: [
-      { name: 'student', networks: [{ name: 'left', ip: '10.10.1.10' }], caps: ['NET_ADMIN', 'NET_RAW'] },
-      { name: 'router', networks: [{ name: 'left', ip: '10.10.1.1' }, { name: 'right', ip: '10.10.2.1' }], caps: ['NET_ADMIN', 'NET_RAW'] },
-      { name: 'server', networks: [{ name: 'right', ip: '10.10.2.20' }], caps: ['NET_ADMIN'] },
-      { name: 'capture', networks: [{ name: 'left', ip: '10.10.1.99' }], caps: ['NET_ADMIN', 'NET_RAW'] },
+      { name: 'student', networks: [{ name: 'left', ip: ipFrom(a, 10) }], caps: ['NET_ADMIN', 'NET_RAW'] },
+      { name: 'router', networks: [{ name: 'left', ip: ipFrom(a, 1) }, { name: 'right', ip: ipFrom(b, 1) }], caps: ['NET_ADMIN', 'NET_RAW'] },
+      { name: 'server', networks: [{ name: 'right', ip: ipFrom(b, 20) }], caps: ['NET_ADMIN'] },
+      { name: 'capture', networks: [{ name: 'left', ip: ipFrom(a, 99) }], caps: ['NET_ADMIN', 'NET_RAW'] },
     ],
     postConfig: [
-      { node: 'student', cmd: 'ip route replace default via 10.10.1.1' },
-      { node: 'server', cmd: 'ip route replace default via 10.10.2.1' },
+      { node: 'student', cmd: `ip route replace default via ${ipFrom(a, 1)}` },
+      { node: 'server', cmd: `ip route replace default via ${ipFrom(b, 1)}` },
       { node: 'router', cmd: 'sysctl -w net.ipv4.ip_forward=1' },
       { node: 'router', cmd: 'iptables -P FORWARD ACCEPT || true' },
     ],
@@ -399,7 +445,7 @@ async function createSession(payload) {
   }
 
   const profile = await ensureImage(profileId);
-  const template = topologyTemplate(topology);
+  const internalOnly = useInternalNetworks(payload);
   const sessionId = genSessionId();
   const prefix = `tblab-${sessionId}`;
 
@@ -413,55 +459,79 @@ async function createSession(payload) {
     updatedAt: nowIso(),
     expiresAt: new Date(Date.now() + ttlMinutes * 60000).toISOString(),
     status: 'creating',
+    isolation: {
+      internalNetworks: internalOnly,
+      noNewPrivileges: Boolean(securityPolicy().noNewPrivileges),
+      capDropAll: Boolean(securityPolicy().capDropAll),
+    },
     networks: [],
     nodes: [],
   };
   state.sessions[sessionId] = session;
   saveState();
 
-  try {
-    for (const n of template.networks) {
-      const fullName = `${prefix}-${n.name}`;
-      await createNetwork(fullName, n.subnet);
-      session.networks.push({ ...n, fullName });
-    }
-
-    for (const node of template.nodes) {
-      const containerName = `${prefix}-${node.name}`;
-      const baseNetwork = session.networks.find((n) => n.name === node.networks[0].name);
-      if (!baseNetwork) throw new Error('invalid network mapping for node ' + node.name);
-
-      const extra = ['--network', baseNetwork.fullName, '--ip', node.networks[0].ip, '--cap-add', 'NET_RAW'];
-      for (const cap of node.caps || []) extra.push('--cap-add', cap);
-
-      await createContainer({ ...node, containerName, hostname: `thinkerbyte-${node.name}` }, profile, extra);
-
-      for (let i = 1; i < node.networks.length; i++) {
-        const netDef = session.networks.find((n) => n.name === node.networks[i].name);
-        if (netDef) await connectContainerNetwork(containerName, netDef.fullName, node.networks[i].ip);
+  const attemptLimit = 12;
+  for (let attempt = 0; attempt < attemptLimit; attempt++) {
+    const template = topologyTemplate(topology, seedFromSession(sessionId, attempt));
+    try {
+      for (const n of template.networks) {
+        const fullName = `${prefix}-${n.name}`;
+        await createNetwork(fullName, n.subnet, internalOnly);
+        session.networks.push({ ...n, fullName, internalOnly });
       }
 
-      session.nodes.push({
-        name: node.name,
-        hostname: `thinkerbyte-${node.name}`,
-        containerName,
-        addresses: node.networks,
-      });
-    }
+      for (const node of template.nodes) {
+        const containerName = `${prefix}-${node.name}`;
+        const baseNetwork = session.networks.find((n) => n.name === node.networks[0].name);
+        if (!baseNetwork) throw new Error('invalid network mapping for node ' + node.name);
 
-    for (const step of template.postConfig) {
-      const node = session.nodes.find((n) => n.name === step.node);
-      if (node) await execIn(node.containerName, step.cmd);
-    }
+        const extra = ['--network', baseNetwork.fullName, '--ip', node.networks[0].ip];
+        const caps = new Set(node.caps || []);
+        for (const cap of caps) extra.push('--cap-add', cap);
 
-    session.status = 'running';
-    session.updatedAt = nowIso();
-    saveState();
-    return session;
-  } catch (err) {
-    await destroySession(sessionId, true);
-    throw err;
+        await createContainer({ ...node, containerName, hostname: `thinkerbyte-${node.name}` }, profile, extra);
+
+        for (let i = 1; i < node.networks.length; i++) {
+          const netDef = session.networks.find((n) => n.name === node.networks[i].name);
+          if (netDef) await connectContainerNetwork(containerName, netDef.fullName, node.networks[i].ip);
+        }
+
+        session.nodes.push({
+          name: node.name,
+          hostname: `thinkerbyte-${node.name}`,
+          containerName,
+          addresses: node.networks,
+        });
+      }
+
+      for (const step of template.postConfig) {
+        const node = session.nodes.find((n) => n.name === step.node);
+        if (node) await execIn(node.containerName, step.cmd);
+      }
+
+      session.status = 'running';
+      session.updatedAt = nowIso();
+      saveState();
+      return session;
+    } catch (err) {
+      await destroySession(sessionId, true);
+      if (!isOverlapError(err) || attempt === attemptLimit - 1) {
+        throw err;
+      }
+      state.sessions[sessionId] = {
+        ...session,
+        status: 'creating',
+        networks: [],
+        nodes: [],
+        updatedAt: nowIso(),
+      };
+      session.networks = [];
+      session.nodes = [];
+      saveState();
+    }
   }
+
+  throw new Error('unable to allocate non-overlapping lab networks');
 }
 
 async function startSession(sessionId) {
@@ -655,6 +725,12 @@ async function route(req, res, url, origin) {
       defaults: manifest.defaults,
       cleanupPolicy: manifest.cleanupPolicy,
       resumeMode: true,
+      isolation: {
+        localhostOnly: true,
+        internalNetworks: securityPolicy().internalNetworks !== false,
+        noNewPrivileges: Boolean(securityPolicy().noNewPrivileges),
+        capDropAll: Boolean(securityPolicy().capDropAll),
+      },
     }, origin);
   }
 

@@ -17,7 +17,15 @@
     "sessionTtlMinutes": 120,
     "maxConcurrentSessions": 6,
     "maxCacheBytes": 6442450944,
-    "pruneUnusedImagesAfterHours": 48
+    "pruneUnusedImagesAfterHours": 48,
+    "allowExternalEgress": false
+  },
+  "securityPolicy": {
+    "internalNetworks": true,
+    "noNewPrivileges": true,
+    "capDropAll": true,
+    "pidsLimit": 256,
+    "memoryLimitMb": 0
   },
   "cleanupPolicy": {
     "removeStoppedContainers": true,
